@@ -9,7 +9,7 @@ st.set_page_config(page_title="Retirement Cashflow Optimizer", layout="wide")
 st.title("🇬🇧 UK Retirement Withdrawal Dashboard")
 st.markdown("""
 This tool models the sustainability of your portfolio and calculates a tax-efficient withdrawal schedule.
-Adjust the sidebar inputs to reflect your current balances and economic assumptions.
+**Update:** Husband's State Pension now correctly ceases at age 80.
 """)
 
 # --- SIDEBAR INPUTS ---
@@ -28,10 +28,10 @@ age_husband = st.sidebar.number_input("Husband Age", value=64)
 age_wife = st.sidebar.number_input("Wife Age", value=56)
 planning_horizon = 95 - age_wife  # Planning until wife is 95
 
-st.sidebar.header("4. Spending Needs")
+st.sidebar.header("4. Spending & Life Events")
 initial_withdrawal = st.sidebar.number_input("Target Annual Withdrawal (Gross)", value=90100, step=1000)
-spending_drop_age = 80 # Husband's expected mortality
-spending_drop_percent = 0.70
+spending_drop_age = st.sidebar.number_input("Husband Mortality Age", value=80, help="Age at which Husband's pension stops and household spending drops.")
+spending_drop_percent = st.sidebar.slider("Spending Drop after Loss (%)", 50, 100, 70) / 100
 
 # --- TAX CONSTANTS (2025/26 Estimates) ---
 PERSONAL_ALLOWANCE = 12570
@@ -46,25 +46,33 @@ current_sipp = sipp_balance
 current_withdrawal = initial_withdrawal
 
 h_state_pension_age = 67
-w_state_pension_age = 67 # Adjusted to 67 based on birth year ~1969
+w_state_pension_age = 67 # Adjusted to 67 based on current UK rules
 h_sp_amount = 11502 # Full New State Pension approx
 w_sp_amount = 9202  # 80% Full New State Pension
 
-for year in range(planning_horizon + 1):
+# Flag to track if spending drop has occurred
+spending_dropped = False
+
+for year in range(int(planning_horizon) + 1):
     h_age = age_husband + year
     w_age = age_wife + year
     
     # 1. Determine Spending Requirement (Inflation Adjusted)
-    if h_age >= spending_drop_age and h_age == spending_drop_age:
-        # One time drop adjustment
+    # Check if we reached the husband's mortality age to drop spending
+    if h_age >= spending_drop_age and not spending_dropped:
         current_withdrawal = current_withdrawal * spending_drop_percent
+        spending_dropped = True
     
     req_income = current_withdrawal
     
     # 2. Determine State Pension Income
     sp_income = 0
-    if h_age >= h_state_pension_age:
+    
+    # Husband Pension: Only if eligible AND alive (under mortality age)
+    if h_age >= h_state_pension_age and h_age < spending_drop_age:
         sp_income += h_sp_amount * ((1 + inflation_rate) ** year)
+        
+    # Wife Pension: Standard eligibility
     if w_age >= w_state_pension_age:
         sp_income += w_sp_amount * ((1 + inflation_rate) ** year)
         
@@ -78,32 +86,14 @@ for year in range(planning_horizon + 1):
     current_sipp *= (1 + isa_sipp_yield)
     
     # 5. Withdrawal Logic (Tax Optimization Strategy)
-    # Order: Cash Interest > SIPP (up to PA) > ISA > SIPP (Basic Rate) > Cash Principal
-    
     remaining_needed = portfolio_withdrawal_needed
-    
-    # A. Use Cash Interest (Taxable likely, but use it first)
-    take_cash = min(current_cash, remaining_needed) # Simplified: taking all cash if needed, prioritising interest
-    # Ideally we leave principal, but for simple depletion we take from cash pool
-    # Refined Logic:
-    # Try to preserve ISA/SIPP tax wrapper. Burn Cash first? 
-    # User Logic: Previous model assumed efficient wrapper usage. 
-    # Strategy: Tax Efficient Blend.
-    
-    # Step A: Take SIPP up to Personal Allowance (Effective Tax Free via PCLS + PA)
-    # Max tax efficient SIPP w/d per person = PA / 0.75 = £16,760 (approx)
-    # Combined efficient SIPP = ~£33,520
     
     sipp_withdrawal = 0
     isa_withdrawal = 0
     cash_withdrawal = 0
     
-    # Optimal SIPP Calculation
-    # We want taxable income to fill Personal Allowance first
-    # Taxable Income = 75% of SIPP Withdrawal.
-    # Target Taxable Income = £12,570 * 2 = £25,140
-    # Required SIPP Withdrawal to hit this = £25,140 / 0.75 = £33,520
-    
+    # Optimal SIPP Calculation (Targeting Basic Rate Band)
+    # We aim to take enough SIPP to fill the personal allowance gap but not exceed basic rate
     optimal_sipp_wd = 33520 
     
     # Take from SIPP
@@ -112,9 +102,7 @@ for year in range(planning_horizon + 1):
     current_sipp -= take_sipp
     remaining_needed -= take_sipp
     
-    # Step B: If we still need money, take from ISA (Tax Free) to avoid tax
-    # (Unless ISA is empty, then go back to SIPP or Cash)
-    
+    # Step B: Take from ISA (Tax Free)
     if remaining_needed > 0:
         take_isa = min(current_isa, remaining_needed)
         isa_withdrawal += take_isa
@@ -128,7 +116,7 @@ for year in range(planning_horizon + 1):
         current_cash -= take_cash
         remaining_needed -= take_cash
         
-    # Step D: If Cash empty, back to SIPP (Taxable at Basic Rate)
+    # Step D: If Cash empty, back to SIPP (Taxable at Basic/Higher Rate)
     if remaining_needed > 0:
         take_sipp_excess = min(current_sipp, remaining_needed)
         sipp_withdrawal += take_sipp_excess
@@ -138,11 +126,12 @@ for year in range(planning_horizon + 1):
     total_portfolio = current_cash + current_isa + current_sipp
     
     # Tax Calculation (Estimate)
-    # SIPP Taxable = SIPP_WD * 0.75
     taxable_income = sipp_withdrawal * 0.75
-    # Allowances (2 people)
     tax_bill = 0
-    excess_income = max(0, taxable_income - (PERSONAL_ALLOWANCE * 2))
+    # Note: If husband is dead (h_age >= 80), we only have 1 Personal Allowance
+    active_allowances = PERSONAL_ALLOWANCE if h_age >= spending_drop_age else (PERSONAL_ALLOWANCE * 2)
+    
+    excess_income = max(0, taxable_income - active_allowances)
     tax_bill = excess_income * 0.20 # Assume basic rate for simplicity
     
     net_pocket = (sipp_withdrawal + isa_withdrawal + cash_withdrawal + sp_income) - tax_bill
@@ -171,7 +160,7 @@ st.header("📊 Financial Projections")
 
 # Metric Row
 final_balance = df.iloc[-1]['Portfolio Balance']
-st.metric(label="Final Portfolio Balance (Age 95)", value=f"£{final_balance:,.0f}")
+st.metric(label="Final Portfolio Balance (Wife Age 95)", value=f"£{final_balance:,.0f}")
 
 # Charts
 st.subheader("Asset Depletion Over Time")
@@ -190,4 +179,3 @@ if final_balance < 0:
     st.error("⚠️ WARNING: Based on these settings, your money will run out before age 95.")
 else:
     st.success("✅ SUCCESS: Your funds are projected to last until age 95.")
-
