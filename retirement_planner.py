@@ -123,4 +123,85 @@ def run_projection(annual_gross_spend, apply_shock=True):
             take_cash = min(curr_cash, remaining_needed)
             cash_wd += take_cash
             curr_cash -= take_cash
-            remaining_needed -= take
+            remaining_needed -= take_cash
+            
+        # 4. SIPP (Taxable Tier - Last Resort)
+        if remaining_needed > 0:
+            take_sipp_excess = min(curr_sipp, remaining_needed)
+            sipp_wd += take_sipp_excess
+            curr_sipp -= take_sipp_excess
+            remaining_needed -= take_sipp_excess
+        
+        # INSOLVENCY CHECK
+        # If we still need money (remaining_needed > 0) but have no assets left
+        if remaining_needed > 1.0: # Tolerance of £1
+            ran_out_early = True
+            
+        # G. Tax Calculation
+        taxable_income_from_sipp = sipp_wd * 0.75
+        total_taxable = total_state_pension + taxable_income_from_sipp
+        excess_taxable = max(0, total_taxable - total_pa)
+        tax_bill = excess_taxable * 0.20
+        
+        total_portfolio = curr_cash + curr_isa + curr_sipp
+        
+        projection_data.append({
+            "Year": year,
+            "Husband Age": int(h_age),
+            "Wife Age": int(w_age),
+            "Portfolio Balance": total_portfolio,
+            "Total Spend (Gross)": curr_spend,
+            "State Pension": total_state_pension,
+            "SIPP WD": sipp_wd,
+            "ISA WD": isa_wd,
+            "Cash WD": cash_wd,
+            "Est. Tax": tax_bill
+        })
+        
+        # Inflate Spend
+        curr_spend *= (1 + inflation_rate)
+        
+    return pd.DataFrame(projection_data), total_portfolio, ran_out_early
+
+# --- SOLVER: FIND MAX SUSTAINABLE SPEND ---
+low_guess = 0.0
+high_guess = 500000.0
+optimized_spend = 0.0
+
+# Binary search
+for _ in range(25): # 25 iterations for high precision
+    mid_guess = (low_guess + high_guess) / 2
+    df_test, final_bal, ran_out = run_projection(mid_guess, apply_shock=True)
+    
+    if ran_out:
+        # We ran out of money early -> Spend less
+        high_guess = mid_guess
+    else:
+        # We made it to the end
+        if final_bal > 0:
+            # We have money left over -> Spend more
+            optimized_spend = mid_guess
+            low_guess = mid_guess
+        else:
+            # We made it but have 0 left (Unlikely to hit exact 0, but fallback)
+            high_guess = mid_guess
+
+# Run final
+df_final, end_balance, ran_out_final = run_projection(optimized_spend, apply_shock=True)
+
+# --- DASHBOARD DISPLAY ---
+st.subheader(f"Recommended Annual Withdrawal (Gross): £{optimized_spend:,.0f}")
+st.caption(f"Start Year: {current_year} | Market Shock Applied: {market_shock}% | Wife Target Age: {target_end_age}")
+
+if ran_out_final:
+    st.error("Warning: Even with this spend, funds may be tight in final years.")
+
+# Graphs
+st.subheader("Portfolio Depletion Curve")
+st.area_chart(df_final.set_index("Year")[["Portfolio Balance"]])
+
+st.subheader("Withdrawal Source")
+st.bar_chart(df_final.set_index("Year")[["State Pension", "SIPP WD", "ISA WD", "Cash WD"]])
+
+st.subheader("Detailed Schedule")
+st.dataframe(df_final.style.format("{:,.0f}"))
